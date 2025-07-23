@@ -62,27 +62,50 @@ class ModelClient:
         raise NotImplementedError
 
 async def _post_with_retry(client: httpx.AsyncClient, url: str, **kwargs) -> httpx.Response:
-    """Effectue un appel POST avec retry automatique en cas d'échec."""
+    """Effectue un appel POST avec retry automatique et backoff exponentiel amélioré."""
+    max_backoff = 60  # Maximum backoff time in seconds
+    
     for attempt in range(MAX_RETRIES):
         try:
             response = await client.post(url, **kwargs)
             response.raise_for_status()
             return response
+        except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+            backoff_time = min(INITIAL_BACKOFF * (2 ** attempt), max_backoff)
+            logging.warning(f"Connection error attempt {attempt + 1}/{MAX_RETRIES}: {e}")
+            logging.info(f"Retrying in {backoff_time}s with exponential backoff")
+            if attempt + 1 == MAX_RETRIES:
+                logging.error(f"Max retries ({MAX_RETRIES}) reached for connection errors")
+                raise
+            await asyncio.sleep(backoff_time)
         except httpx.TimeoutException as e:
+            backoff_time = min(INITIAL_BACKOFF * (2 ** attempt), max_backoff)
             logging.warning(f"Timeout attempt {attempt + 1}/{MAX_RETRIES}: {e}")
+            logging.info(f"Retrying in {backoff_time}s with exponential backoff")
             if attempt + 1 == MAX_RETRIES:
+                logging.error(f"Max retries ({MAX_RETRIES}) reached for timeout errors")
                 raise
-            await asyncio.sleep(INITIAL_BACKOFF * (2 ** attempt))
+            await asyncio.sleep(backoff_time)
         except httpx.HTTPStatusError as e:
-            logging.warning(f"HTTP error attempt {attempt + 1}/{MAX_RETRIES}: {e.response.status_code}")
-            if attempt + 1 == MAX_RETRIES:
+            if e.response.status_code in [429, 502, 503, 504]:  # Rate limit and server errors
+                backoff_time = min(INITIAL_BACKOFF * (2 ** attempt), max_backoff)
+                logging.warning(f"HTTP {e.response.status_code} error attempt {attempt + 1}/{MAX_RETRIES}: {e}")
+                logging.info(f"Retrying in {backoff_time}s with exponential backoff")
+                if attempt + 1 == MAX_RETRIES:
+                    logging.error(f"Max retries ({MAX_RETRIES}) reached for HTTP {e.response.status_code} errors")
+                    raise
+                await asyncio.sleep(backoff_time)
+            else:
+                logging.error(f"Non-retryable HTTP error {e.response.status_code}: {e}")
                 raise
-            await asyncio.sleep(INITIAL_BACKOFF * (2 ** attempt))
         except httpx.RequestError as e:
+            backoff_time = min(INITIAL_BACKOFF * (2 ** attempt), max_backoff)
             logging.warning(f"Request error attempt {attempt + 1}/{MAX_RETRIES}: {e}")
+            logging.info(f"Retrying in {backoff_time}s with exponential backoff")
             if attempt + 1 == MAX_RETRIES:
+                logging.error(f"Max retries ({MAX_RETRIES}) reached for request errors")
                 raise
-            await asyncio.sleep(INITIAL_BACKOFF * (2 ** attempt))
+            await asyncio.sleep(backoff_time)
 
 class OpenAIClient(ModelClient):
     """Client pour l'API OpenAI (ChatGPT)."""
