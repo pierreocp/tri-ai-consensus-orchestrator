@@ -62,27 +62,44 @@ class ModelClient:
         raise NotImplementedError
 
 async def _post_with_retry(client: httpx.AsyncClient, url: str, **kwargs) -> httpx.Response:
-    """Effectue un appel POST avec retry automatique en cas d'échec."""
+    """Effectue un appel POST avec retry automatique en cas d'échec avec backoff exponentiel adaptatif."""
+    import random
+    
+    MAX_BACKOFF = 60  # Maximum backoff time in seconds
+    retry_count = 0
+    
     for attempt in range(MAX_RETRIES):
+        retry_count += 1
         try:
             response = await client.post(url, **kwargs)
             response.raise_for_status()
             return response
         except httpx.TimeoutException as e:
-            logging.warning(f"Timeout attempt {attempt + 1}/{MAX_RETRIES}: {e}")
-            if attempt + 1 == MAX_RETRIES:
+            logging.warning(f"Timeout attempt {retry_count}/{MAX_RETRIES}: {e}")
+            if retry_count >= MAX_RETRIES:
                 raise
-            await asyncio.sleep(INITIAL_BACKOFF * (2 ** attempt))
         except httpx.HTTPStatusError as e:
-            logging.warning(f"HTTP error attempt {attempt + 1}/{MAX_RETRIES}: {e.response.status_code}")
-            if attempt + 1 == MAX_RETRIES:
+            logging.warning(f"HTTP error attempt {retry_count}/{MAX_RETRIES}: {e.response.status_code}")
+            if retry_count >= MAX_RETRIES:
                 raise
-            await asyncio.sleep(INITIAL_BACKOFF * (2 ** attempt))
+            if 400 <= e.response.status_code < 500:
+                raise
+        except httpx.ConnectError as e:
+            logging.warning(f"Connection error attempt {retry_count}/{MAX_RETRIES}: {e}")
+            if retry_count >= MAX_RETRIES:
+                raise
         except httpx.RequestError as e:
-            logging.warning(f"Request error attempt {attempt + 1}/{MAX_RETRIES}: {e}")
-            if attempt + 1 == MAX_RETRIES:
+            logging.warning(f"Request error attempt {retry_count}/{MAX_RETRIES}: {e}")
+            if retry_count >= MAX_RETRIES:
                 raise
-            await asyncio.sleep(INITIAL_BACKOFF * (2 ** attempt))
+        
+        base_delay = INITIAL_BACKOFF * (2 ** attempt)
+        max_delay = min(base_delay, MAX_BACKOFF)
+        jitter = random.uniform(0.1, 0.3) * max_delay  # 10-30% jitter
+        delay = max_delay + jitter
+        
+        logging.info(f"Retrying in {delay:.2f} seconds (attempt {retry_count}/{MAX_RETRIES})")
+        await asyncio.sleep(delay)
 
 class OpenAIClient(ModelClient):
     """Client pour l'API OpenAI (ChatGPT)."""
