@@ -119,10 +119,33 @@ class AnthropicClient(ModelClient):
         system_prompt = "\n\n".join(system_prompts) if system_prompts else None
         
         # Convert messages (excluding system messages)
-        converted = [
-            {"role": "user" if m.role == "user" else "assistant", "content": m.content}
-            for m in messages if m.role != "system"
-        ]
+        converted = []
+        for m in messages:
+            if m.role == "system":
+                continue
+            # Map roles correctly for Anthropic
+            role = "user" if m.role in ["user", "moderator"] else "assistant"
+            converted.append({"role": role, "content": m.content})
+        
+        # Ensure conversation starts with user message and alternates properly
+        if not converted or converted[0]["role"] != "user":
+            if verbose:
+                print("[Claude Debug] Adding initial user message")
+            converted.insert(0, {"role": "user", "content": "Bonjour, participez à cette conversation."})
+        
+        # Ensure proper alternation between user and assistant
+        fixed_messages = []
+        last_role = None
+        for msg in converted:
+            if msg["role"] == last_role:
+                # Skip duplicate consecutive roles
+                if verbose:
+                    print(f"[Claude Debug] Skipping duplicate {msg['role']} message")
+                continue
+            fixed_messages.append(msg)
+            last_role = msg["role"]
+        
+        converted = fixed_messages
         
         payload = {
             "model": self.model,
@@ -149,11 +172,19 @@ class AnthropicClient(ModelClient):
             result = "\n".join(text_parts).strip()
             if verbose:
                 print(f"[Claude Debug] Extracted text: '{result}'")
-            # Handle empty responses
+            # Handle empty responses with more detailed debugging
             if not result:
                 if verbose:
-                    print("[Claude Debug] Empty response, using fallback")
-                return "Je préfère ne pas répondre à cette question pour le moment."
+                    print(f"[Claude Debug] Empty response detected. Content blocks: {blocks}")
+                    print(f"[Claude Debug] Full response data: {data}")
+                # Try alternative response extraction
+                if "content" in data and data["content"]:
+                    for block in data["content"]:
+                        if "text" in block:
+                            result = block["text"].strip()
+                            if result:
+                                return result
+                return "Bonjour ! Je participe à cette conversation."
             return result
 
 MENTION_REGEX = re.compile(r"\b@([A-Za-z0-9_-]+)\b", re.IGNORECASE)
@@ -185,15 +216,39 @@ class GeminiClient(ModelClient):
         }
         params = {"key": key}
         async with httpx.AsyncClient(timeout=timeout) as client:
+            if verbose:
+                print(f"[Gemini Debug] Payload: {json.dumps(payload, indent=2)}")
             r = await _post_with_retry(client, url, params=params, json=payload)
             if verbose:
-                logging.info(f"[Gemini raw]\n{r.text}\n")
+                print(f"[Gemini Debug] Response: {r.text}")
             data = r.json()
             candidates = data.get("candidates", [])
+            
+            if verbose:
+                print(f"[Gemini Debug] Candidates: {candidates}")
+            
             if candidates and "content" in candidates[0]:
                 parts = candidates[0]["content"].get("parts", [])
-                return "\n".join(p.get("text", "") for p in parts).strip() or "(réponse vide)"
-            raise RuntimeError(f"Réponse Gemini inattendue: {json.dumps(data, indent=2)[:500]}")
+                result = "\n".join(p.get("text", "") for p in parts).strip()
+                if verbose:
+                    print(f"[Gemini Debug] Extracted text: '{result}'")
+                if result:
+                    return result
+                else:
+                    if verbose:
+                        print("[Gemini Debug] Empty result, using fallback")
+                    return "Bonjour ! Je participe à cette discussion."
+            
+            # Check for errors in response
+            if "error" in data:
+                error_msg = data["error"].get("message", "Erreur inconnue")
+                if verbose:
+                    print(f"[Gemini Debug] API Error: {error_msg}")
+                return f"Erreur Gemini: {error_msg}"
+            
+            if verbose:
+                print(f"[Gemini Debug] Unexpected response structure: {json.dumps(data, indent=2)[:500]}")
+            return "Désolé, je n'ai pas pu traiter cette demande."
 
 @dataclass
 class OrchestratorConfig:
@@ -322,6 +377,7 @@ Exemples d'utilisation:
                    help="Active le mode verbeux avec logs détaillés")
     p.add_argument("--self-improve", action="store_true",
                    help="Active le mode d'auto-amélioration (EXPERIMENTAL)")
+    p.add_argument("--consensus", action="store_true", help="Active le mode de consensus collaboratif entre IA")
     p.add_argument("--openai_model", default="gpt-4o",
                    help="Modèle OpenAI à utiliser")
     p.add_argument("--anthropic_model", default="claude-3-5-sonnet-20240620",
@@ -351,10 +407,10 @@ async def main():
             )
             logging.info("Mode verbeux activé")
         
-        agents: List[ModelClient] = [
-            OpenAIClient(name="ChatGPT", model=args.openai_model),
-            AnthropicClient(name="Claude", model=args.anthropic_model),
-            GeminiClient(name="Gemini", model=args.gemini_model),
+        agents = [
+            OpenAIClient("ChatGPT", "gpt-4o"),
+            AnthropicClient("Claude", "claude-3-5-sonnet-20241022"),  # Try newer model version
+            GeminiClient("Gemini", "gemini-1.5-pro"),
         ]
         
         system_prompt = (
@@ -375,21 +431,69 @@ async def main():
             system_prompt=system_prompt,
         )
         
+        # Mode consensus
+        if args.consensus:
+            print(" Mode consensus collaboratif activé!")
+            print("Les IA vont discuter, voter et potentiellement réécrire leur code ensemble.")
+            confirmation = input("Voulez-vous vraiment continuer? (oui/non): ")
+            if confirmation.lower() != "oui":
+                print("Annulé.")
+                return
+            
+            try:
+                from consensus_system import ConsensusOrchestrator
+                consensus_orchestrator = ConsensusOrchestrator(agents)
+                
+                # Utilise le prompt comme sujet de discussion
+                topic = args.prompt or "Amélioration générale du système tri-IA"
+                
+                # Phase 1: Discussion et proposition
+                proposal = await consensus_orchestrator.initiate_proposal_discussion(topic)
+                
+                if proposal:
+                    # Phase 2: Vote
+                    consensus_reached = await consensus_orchestrator.conduct_voting(proposal)
+                    
+                    if consensus_reached:
+                        # Phase 3: Implémentation
+                        print("\n Consensus atteint ! Implémentation en cours...")
+                        success = await consensus_orchestrator.implement_approved_proposal(proposal)
+                        
+                        if success:
+                            print(" SUCCÈS! Les IA ont collaboré pour améliorer leur propre code!")
+                        else:
+                            print(" Échec de l'implémentation")
+                    else:
+                        print(" Pas de consensus. Proposition rejetée.")
+                        
+                        # Analyse des modifications suggérées
+                        modifications = proposal.get_modifications_suggested()
+                        if modifications:
+                            print("\n Modifications suggérées:")
+                            for i, mod in enumerate(modifications, 1):
+                                print(f"{i}. {mod}")
+                else:
+                    print(" Aucune proposition viable n'a émergé de la discussion")
+                    
+            except ImportError:
+                print(" Module de consensus non disponible")
+            return
+        
         # Mode d'auto-amélioration
-        if getattr(args, 'self_improve', False):
+        if args.self_improve:
             if not SELF_IMPROVEMENT_AVAILABLE:
                 raise RuntimeError("Le module d'auto-amélioration n'est pas disponible")
             
-            print("🤖 Mode d'auto-amélioration activé!")
-            print("⚠️  ATTENTION: Mode expérimental - utilisez à vos risques et périls")
-            
-            # Demander confirmation
-            response = input("Voulez-vous vraiment continuer? (oui/non): ")
-            if response.lower() not in ['oui', 'o', 'yes', 'y']:
-                print("🚫 Opération annulée")
+            print(" Mode auto-amélioration activé!")
+            print("  ATTENTION: Mode expérimental - les IA vont modifier leur propre code!")
+            confirmation = input("Voulez-vous vraiment continuer? (oui/non): ")
+            if confirmation.lower() != "oui":
+                print("Annulé.")
                 return
             
-            await run_self_improvement_mode(__file__, orch)
+            from self_improvement import SelfImprovementOrchestrator
+            improvement_orchestrator = SelfImprovementOrchestrator()
+            await improvement_orchestrator.run_self_improvement_cycle(args.prompt)
             return
         
         logging.info(f"Démarrage de la conversation avec {args.turns} tours")
@@ -397,9 +501,9 @@ async def main():
         logging.info("Conversation terminée avec succès")
         
     except KeyboardInterrupt:
-        print("\n⚠️ Interruption par l'utilisateur")
+        print("\n Interruption par l'utilisateur")
     except (ValueError, RuntimeError) as e:
-        print(f"❌ Erreur: {e}")
+        print(f" Erreur: {e}")
         exit(1)
     except Exception as e:
         logging.error(f"Erreur inattendue: {e}")

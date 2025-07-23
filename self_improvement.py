@@ -85,9 +85,20 @@ class VersionManager:
         """Crée un tag pour marquer une version."""
         self.repo.create_tag(tag_name, message=message)
     
-    def rollback_to_commit(self, commit_hash: str) -> None:
-        """Rollback vers un commit spécifique."""
-        self.repo.git.reset('--hard', commit_hash)
+    def rollback_to_commit(self, commit_hash: str = None) -> None:
+        """Rollback vers un commit spécifique ou le précédent."""
+        try:
+            if commit_hash:
+                self.repo.git.reset('--hard', commit_hash)
+            else:
+                # Rollback vers le commit précédent s'il existe
+                commits = list(self.repo.iter_commits(max_count=2))
+                if len(commits) > 1:
+                    self.repo.git.reset('--hard', commits[1].hexsha)
+                else:
+                    print("⚠️ Aucun commit précédent pour le rollback")
+        except Exception as e:
+            print(f"⚠️ Erreur lors du rollback: {e}")
     
     def get_diff(self, commit1: str = None, commit2: str = None) -> str:
         """Obtient le diff entre deux commits."""
@@ -318,49 +329,101 @@ class SelfImprovementOrchestrator:
             current_code = f.read()
         
         prompt = f"""
-        Analysez ce code Python et proposez UNE amélioration spécifique et concrète.
-        Votre réponse doit être au format JSON avec ces champs:
-        {{
-            "description": "Description courte de l'amélioration",
-            "code_changes": "Code modifié ou ajouté (maximum 50 lignes)",
-            "rationale": "Pourquoi cette amélioration est bénéfique",
-            "priority": 5,
-            "risk_level": "low"
-        }}
-        
-        Code actuel:
-        {current_code[:2000]}...
-        
-        Concentrez-vous sur des améliorations simples et sûres comme:
-        - Amélioration des messages d'erreur
-        - Optimisation des performances
-        - Ajout de fonctionnalités utiles
-        - Meilleure gestion des exceptions
+Analysez ce script Python et proposez UNE amélioration concrète et simple.
+
+Répondez UNIQUEMENT avec un JSON valide dans ce format exact:
+{{
+    "description": "Description courte (max 50 caractères)",
+    "code_changes": "Code à ajouter ou modifier (max 10 lignes)",
+    "rationale": "Justification courte",
+    "priority": 5,
+    "risk_level": "low"
+}}
+
+Exemples d'améliorations simples:
+- Ajouter une fonction d'aide
+- Améliorer un message d'erreur
+- Ajouter une validation
+- Optimiser une fonction existante
+
+Code actuel (extrait):
+{current_code[:1500]}...
+
+Répondez SEULEMENT avec le JSON, rien d'autre.
         """
         
-        # Utiliser l'orchestrateur IA existant pour obtenir les propositions
-        # (Simulation pour le prototype)
         proposals = []
         
-        # Pour le prototype, on simule des propositions
-        sample_proposals = [
-            ImprovementProposal(
-                author="ChatGPT",
-                description="Ajouter un indicateur de progression",
-                code_changes="""
-# Ajout d'un indicateur de progression
-import tqdm
-
-def show_progress(current, total):
-    return f"[{current}/{total}] {'█' * (current * 20 // total)}{'░' * (20 - current * 20 // total)}"
-""",
-                rationale="Améliore l'expérience utilisateur en montrant le progrès",
-                priority=7,
-                risk_level="low"
-            )
-        ]
+        if self.ai_orchestrator:
+            try:
+                # Utiliser les IA réelles pour obtenir des propositions
+                from tri_ai_orchestrator import ChatMessage
+                
+                messages = [
+                    ChatMessage(role="system", name="system", 
+                              content="Tu es un expert en amélioration de code Python. Réponds uniquement avec du JSON valide."),
+                    ChatMessage(role="user", name="user", content=prompt)
+                ]
+                
+                # Demander à chaque IA une proposition
+                for agent in self.ai_orchestrator.agents[:1]:  # Une seule IA pour commencer
+                    try:
+                        response = await agent.send(
+                            messages, 
+                            max_tokens=200, 
+                            timeout=30, 
+                            verbose=False
+                        )
+                        
+                        # Essayer de parser le JSON
+                        import json
+                        import re
+                        
+                        # Extraire le JSON de la réponse
+                        json_match = re.search(r'\{.*\}', response, re.DOTALL)
+                        if json_match:
+                            json_str = json_match.group(0)
+                            data = json.loads(json_str)
+                            
+                            proposal = ImprovementProposal(
+                                author=agent.name,
+                                description=data.get('description', 'Amélioration'),
+                                code_changes=data.get('code_changes', ''),
+                                rationale=data.get('rationale', 'Amélioration générale'),
+                                priority=data.get('priority', 5),
+                                risk_level=data.get('risk_level', 'low')
+                            )
+                            proposals.append(proposal)
+                            print(f"✅ Proposition reçue de {agent.name}: {proposal.description}")
+                        else:
+                            print(f"⚠️ Réponse non-JSON de {agent.name}: {response[:100]}...")
+                            
+                    except Exception as e:
+                        print(f"⚠️ Erreur avec {agent.name}: {e}")
+                        
+            except Exception as e:
+                print(f"⚠️ Erreur lors de la récupération des propositions: {e}")
         
-        return sample_proposals
+        # Fallback: propositions par défaut si aucune IA n'a répondu
+        if not proposals:
+            proposals = [
+                ImprovementProposal(
+                    author="System",
+                    description="Ajouter fonction utilitaire",
+                    code_changes="""
+# Fonction utilitaire pour formater le temps
+def format_duration(seconds):
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    return f"{seconds/60:.1f}min"
+""",
+                    rationale="Utilitaire pour afficher les durées",
+                    priority=5,
+                    risk_level="low"
+                )
+            ]
+        
+        return proposals
     
     def _select_best_proposal(self, proposals: List[ImprovementProposal]) -> ImprovementProposal:
         """Sélectionne la meilleure proposition basée sur la priorité et le risque."""
